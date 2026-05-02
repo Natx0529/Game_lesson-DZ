@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Пул — простой бильярд</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      min-height: 100%;
+      background: #0f1729;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: #e8eef5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0.75rem;
+      user-select: none;
+      touch-action: none;
+    }
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 0.35rem;
+    }
+    .hint {
+      font-size: 0.82rem;
+      color: #8ab4c7;
+      margin-bottom: 0.5rem;
+      max-width: 520px;
+      text-align: center;
+      line-height: 1.45;
+    }
+    #wrap {
+      position: relative;
+      border-radius: 12px;
+      box-shadow: 0 14px 48px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+      border: 3px solid #3d5a7c;
+    }
+    canvas { display: block; background: #1a2332; touch-action: none; cursor: crosshair; }
+    #hud {
+      margin-top: 0.6rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.25rem;
+      justify-content: center;
+      font-size: 0.88rem;
+      color: #9cf;
+    }
+    #hud strong { color: #fff; }
+    #barWrap {
+      margin-top: 0.45rem;
+      width: min(520px, 96vw);
+      height: 12px;
+      background: rgba(255,255,255,0.12);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    #powerBar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #22c55e, #eab308, #ef4444);
+      border-radius: 8px;
+      transition: width 0.04s linear;
+    }
+    #controls {
+      margin-top: 0.65rem;
+      display: flex;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    button {
+      background: #e94560;
+      color: #fff;
+      border: none;
+      padding: 0.55rem 1.1rem;
+      font-size: 0.95rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    button:hover { filter: brightness(1.08); }
+    button.secondary {
+      background: #334155;
+    }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(8, 12, 24, 0.88);
+      text-align: center;
+      padding: 1rem;
+    }
+    #overlay.show { display: flex; }
+    #overlay h2 { font-size: 1.35rem; margin-bottom: 0.45rem; }
+    #overlay p { color: #aab; max-width: 320px; line-height: 1.45; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Пул (упрощённый 8-ball)</h1>
+  <p class="hint">
+    Два игрока за одним столом. Наведи направление от битка к курсору. Зажми левую кнопку мыши (или палец) — набирается сила; отпусти — удар.
+    Первый забитый цветной шар закрепляет «свои» шары. Забей все свои, затем чёрную — победа. Штраф: уронил биток в лузу — соперник ставит биток в «кухню» (левая половина стола).
+  </p>
+  <div id="wrap">
+    <canvas id="game" width="900" height="480" aria-label="Бильярдный стол"></canvas>
+    <div id="overlay">
+      <h2 id="endTitle">Конец партии</h2>
+      <p id="endMsg"></p>
+      <button type="button" id="againBtn">Новая партия</button>
+    </div>
+  </div>
+  <div id="hud">
+    <span>Ход: <strong id="turnVal">Игрок 1</strong></span>
+    <span>Группы: <strong id="groupVal">стол открыт</strong></span>
+    <span>Осталось: <strong id="leftVal">—</strong></span>
+    <span>Забито: <strong id="scoreVal">Игр.1: 0 · Игр.2: 0</strong></span>
+  </div>
+  <div id="barWrap"><div id="powerBar"></div></div>
+  <div id="controls">
+    <button type="button" id="newBtn" class="secondary">Сбросить стол</button>
+  </div>
+
+  <script>
+(function () {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const turnVal = document.getElementById('turnVal');
+  const groupVal = document.getElementById('groupVal');
+  const leftVal = document.getElementById('leftVal');
+  const scoreVal = document.getElementById('scoreVal');
+  const powerBar = document.getElementById('powerBar');
+  const newBtn = document.getElementById('newBtn');
+  const overlay = document.getElementById('overlay');
+  const endTitle = document.getElementById('endTitle');
+  const endMsg = document.getElementById('endMsg');
+  const againBtn = document.getElementById('againBtn');
+
+  const W = canvas.width;
+  const H = canvas.height;
+
+  /** Мировые координаты стола (внутри бортов) */
+  const MARGIN = 52;
+  const TABLE_X0 = MARGIN;
+  const TABLE_Y0 = MARGIN;
+  const TABLE_X1 = W - MARGIN;
+  const TABLE_Y1 = H - MARGIN;
+  const TW = TABLE_X1 - TABLE_X0;
+  const TH = TABLE_Y1 - TABLE_Y0;
+
+  const BALL_R = 9;
+  const POCKET_R = 24;
+  const MAX_SPEED = 2550;
+  const FRICTION = 0.994;
+  const REST_WALL = 0.78;
+  const SUB_STEPS = 10;
+  const MAX_POWER_MS = 1400;
+  const MIN_SHOT_SPEED = 520;
+  const STOP_EPS = 8;
+
+  /** Лузы: углы + середины длинных сторон */
+  const pockets = [
+    { x: TABLE_X0, y: TABLE_Y0 },
+    { x: (TABLE_X0 + TABLE_X1) / 2, y: TABLE_Y0 },
+    { x: TABLE_X1, y: TABLE_Y0 },
+    { x: TABLE_X0, y: TABLE_Y1 },
+    { x: (TABLE_X0 + TABLE_X1) / 2, y: TABLE_Y1 },
+    { x: TABLE_X1, y: TABLE_Y1 },
+  ];
+
+  let balls = [];
+  let cueBall = null;
+
+  let currentPlayer = 1;
+  /** null до первого забитого цветного: { 1: 'solid'|'stripe', 2: ... } */
+  let groups = { 1: null, 2: null };
+  let openTable = true;
+
+  let phase = 'aim';
+  let charging = false;
+  let chargeStart = 0;
+  let aimX = 0;
+  let aimY = 0;
+
+  let ballInHand = false;
+  let placingCue = false;
+
+  let lastShotPlayer = 1;
+  let pocketedThisTurn = [];
+  /** Сколько объектных шаров (цветных + восьмёрка) забил игрок за партию */
+  let score = { 1: 0, 2: 0 };
+
+  function dist(ax, ay, bx, by) {
+    return Math.hypot(ax - bx, ay - by);
+  }
+
+  /** Цвета как в пуле: 1–7 и те же оттенки для 9–15 (полосатые) */
+  const BALL_COLOR = {
+    1: '#f1c40f',
+    2: '#2874a6',
+    3: '#c0392b',
+    4: '#8e44ad',
+    5: '#e67e22',
+    6: '#1e8449',
+    7: '#641e16',
+    9: '#f1c40f',
+    10: '#2874a6',
+    11: '#c0392b',
+    12: '#8e44ad',
+    13: '#e67e22',
+    14: '#1e8449',
+    15: '#641e16',
+  };
+
+  /** Номер шара по позиции в треугольнике (индекс 4 — центр, восьмёрка) */
+  const RACK_NUMBERS = [
+    1, 6, 9, 3, 8, 7, 4, 5, 10, 11, 12, 13, 14, 15, 2,
+  ];
+
+  function typeFromNumber(num) {
+    if (num === 8) return 'eight';
+    if (num >= 1 && num <= 7) return 'solid';
+    return 'stripe';
+  }
+
+  function makeBall(x, y, type, id, ballNum) {
+    return {
+      x, y, vx: 0, vy: 0,
+      type,
+      id,
+      ballNum: ballNum == null ? null : ballNum,
+      onTable: true,
+    };
+  }
+
+  function rackPositions() {
+    const cx = TABLE_X0 + TW * 0.72;
+    const cy = TABLE_Y0 + TH * 0.5;
+    const sep = BALL_R * 2.05;
+    const positions = [];
+    let idx = 0;
+    for (let row = 0; row < 5; row++) {
+      for (let col = 0; col <= row; col++) {
+        const ox = row * sep * 0.866;
+        const oy = (col - row / 2) * sep;
+        positions.push({ x: cx + ox, y: cy + oy, i: idx++ });
+      }
+    }
+    return positions;
+  }
+
+  function initTable() {
+    balls = [];
+    let id = 0;
+    const cue = makeBall(TABLE_X0 + TW * 0.22, TABLE_Y0 + TH * 0.5, 'cue', id++);
+    cueBall = cue;
+    balls.push(cue);
+
+    const rack = rackPositions();
+    for (let i = 0; i < 15 && i < rack.length; i++) {
+      const num = RACK_NUMBERS[i];
+      balls.push(makeBall(rack[i].x, rack[i].y, typeFromNumber(num), id++, num));
+    }
+
+    currentPlayer = 1;
+    groups = { 1: null, 2: null };
+    openTable = true;
+    phase = 'aim';
+    charging = false;
+    ballInHand = false;
+    placingCue = false;
+    pocketedThisTurn = [];
+    score = { 1: 0, 2: 0 };
+    overlay.classList.remove('show');
+    refreshHud();
+  }
+
+  function countLeft(player) {
+    const g = groups[player];
+    if (!g) return '—';
+    let n = 0;
+    for (const b of balls) {
+      if (!b.onTable || b.type === 'cue' || b.type === 'eight') continue;
+      if (b.type === g) n++;
+    }
+    return String(n);
+  }
+
+  function refreshHud() {
+    turnVal.textContent = currentPlayer === 1 ? 'Игрок 1' : 'Игрок 2';
+    if (openTable) {
+      groupVal.textContent = 'стол открыт';
+    } else {
+      const g1 = groups[1] === 'solid' ? 'цельные' : 'полосатые';
+      const g2 = groups[2] === 'solid' ? 'цельные' : 'полосатые';
+      groupVal.textContent = 'Игр.1: ' + g1 + ' · Игр.2: ' + g2;
+    }
+    leftVal.textContent =
+      'Игр.1: ' + countLeft(1) + ' · Игр.2: ' + countLeft(2);
+    scoreVal.textContent =
+      'Игр.1: ' + score[1] + ' · Игр.2: ' + score[2];
+  }
+
+  function allStopped() {
+    for (const b of balls) {
+      if (!b.onTable) continue;
+      if (b.vx * b.vx + b.vy * b.vy > STOP_EPS * STOP_EPS) return false;
+    }
+    return true;
+  }
+
+  function resolvePockets() {
+    const sunk = [];
+    for (const b of balls) {
+      if (!b.onTable) continue;
+      for (const p of pockets) {
+        if (dist(b.x, b.y, p.x, p.y) < POCKET_R - BALL_R * 0.35) {
+          sunk.push(b);
+          break;
+        }
+      }
+    }
+    for (const b of sunk) {
+      b.onTable = false;
+      b.vx = 0;
+      b.vy = 0;
+      pocketedThisTurn.push(b);
+    }
+  }
+
+  function walls(b) {
+    let x = b.x;
+    let y = b.y;
+    const r = BALL_R;
+    if (x - r < TABLE_X0) { b.vx = -b.vx * REST_WALL; x = TABLE_X0 + r; }
+    if (x + r > TABLE_X1) { b.vx = -b.vx * REST_WALL; x = TABLE_X1 - r; }
+    if (y - r < TABLE_Y0) { b.vy = -b.vy * REST_WALL; y = TABLE_Y0 + r; }
+    if (y + r > TABLE_Y1) { b.vy = -b.vy * REST_WALL; y = TABLE_Y1 - r; }
+    b.x = x;
+    b.y = y;
+  }
+
+  function collidePair(a, b) {
+    if (!a.onTable || !b.onTable) return;
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let d = Math.hypot(dx, dy);
+    const minD = BALL_R * 2;
+    if (d < 0.001) {
+      d = 0.001;
+      dx = 0.001;
+      dy = 0;
+    }
+    if (d >= minD) return;
+
+    const nx = dx / d;
+    const ny = dy / d;
+    const overlap = minD - d;
+    const sx = (nx * overlap) / 2;
+    const sy = (ny * overlap) / 2;
+    a.x -= sx;
+    a.y -= sy;
+    b.x += sx;
+    b.y += sy;
+
+    const rvx = b.vx - a.vx;
+    const rvy = b.vy - a.vy;
+    const vn = rvx * nx + rvy * ny;
+    if (vn >= 0) return;
+
+    const impulse = 2 * vn / 2;
+    a.vx += impulse * nx;
+    a.vy += impulse * ny;
+    b.vx -= impulse * nx;
+    b.vy -= impulse * ny;
+  }
+
+  function stepPhysics(dt) {
+    for (const b of balls) {
+      if (!b.onTable) continue;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.vx *= FRICTION;
+      b.vy *= FRICTION;
+      if (Math.abs(b.vx) < 1) b.vx = 0;
+      if (Math.abs(b.vy) < 1) b.vy = 0;
+      walls(b);
+    }
+    for (let i = 0; i < balls.length; i++) {
+      for (let j = i + 1; j < balls.length; j++) {
+        collidePair(balls[i], balls[j]);
+      }
+    }
+    resolvePockets();
+  }
+
+  function kitchenContains(x, y) {
+    return (
+      x > TABLE_X0 + BALL_R &&
+      x < TABLE_X0 + TW * 0.5 - BALL_R &&
+      y > TABLE_Y0 + BALL_R &&
+      y < TABLE_Y1 - BALL_R
+    );
+  }
+
+  function spotFree(x, y) {
+    if (!kitchenContains(x, y)) return false;
+    for (const b of balls) {
+      if (!b.onTable) continue;
+      if (dist(x, y, b.x, b.y) < BALL_R * 2.2) return false;
+    }
+    return true;
+  }
+
+  function endGame(title, msg) {
+    endTitle.textContent = title;
+    endMsg.textContent = msg;
+    overlay.classList.add('show');
+    phase = 'over';
+  }
+
+  function assignGroups(firstBall) {
+    if (!openTable) return;
+    const shooter = lastShotPlayer;
+    const other = shooter === 1 ? 2 : 1;
+    if (firstBall.type === 'solid') {
+      groups[shooter] = 'solid';
+      groups[other] = 'stripe';
+    } else {
+      groups[shooter] = 'stripe';
+      groups[other] = 'solid';
+    }
+    openTable = false;
+  }
+
+  function afterShotResolved() {
+    for (const b of pocketedThisTurn) {
+      if (b.type !== 'cue') score[lastShotPlayer]++;
+    }
+
+    const cueSunk = pocketedThisTurn.some((b) => b.type === 'cue');
+    const eightSunk = pocketedThisTurn.some((b) => b.type === 'eight');
+    const colored = pocketedThisTurn.filter(
+      (b) => b.type === 'solid' || b.type === 'stripe'
+    );
+
+    if (cueSunk) {
+      cueBall.onTable = true;
+      cueBall.vx = cueBall.vy = 0;
+      const kx = TABLE_X0 + TW * 0.28;
+      const ky = TABLE_Y0 + TH * 0.5;
+      cueBall.x = kx;
+      cueBall.y = ky;
+      ballInHand = true;
+      placingCue = false;
+      currentPlayer = currentPlayer === 1 ? 2 : 1;
+      pocketedThisTurn = [];
+      refreshHud();
+      phase = 'aim';
+      return;
+    }
+
+    if (eightSunk) {
+      const me = lastShotPlayer;
+      const myGroup = groups[me];
+      let myRemaining = 0;
+      for (const b of balls) {
+        if (!b.onTable) continue;
+        if (b.type === myGroup) myRemaining++;
+      }
+      if (openTable || myRemaining > 0) {
+        endGame(
+          'Партия окончена',
+          'Чёрный забит слишком рано — победа у соперника (игрок ' +
+            (me === 1 ? 2 : 1) +
+            ').'
+        );
+      } else {
+        endGame('Победа!', 'Игрок ' + me + ' забил чёрную после своих шаров.');
+      }
+      refreshHud();
+      return;
+    }
+
+    for (const b of colored) {
+      if (openTable) assignGroups(b);
+    }
+
+    let continueTurn = false;
+    for (const b of colored) {
+      if (groups[lastShotPlayer] && b.type === groups[lastShotPlayer]) {
+        continueTurn = true;
+      }
+    }
+
+    pocketedThisTurn = [];
+    if (continueTurn) {
+      phase = 'aim';
+      refreshHud();
+      return;
+    }
+
+    currentPlayer = currentPlayer === 1 ? 2 : 1;
+    phase = 'aim';
+    refreshHud();
+  }
+
+  function loopRolling() {
+    const dt = (1 / 60) / SUB_STEPS;
+    for (let s = 0; s < SUB_STEPS; s++) stepPhysics(dt);
+    if (!allStopped()) return;
+    afterShotResolved();
+  }
+
+  function drawTable() {
+    ctx.fillStyle = '#2a1810';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = '#0d5c36';
+    ctx.fillRect(TABLE_X0, TABLE_Y0, TW, TH);
+
+    ctx.strokeStyle = '#6b4e3d';
+    ctx.lineWidth = 10;
+    ctx.strokeRect(TABLE_X0, TABLE_Y0, TW, TH);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.setLineDash([8, 10]);
+    ctx.lineWidth = 2;
+    const midX = TABLE_X0 + TW * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(midX, TABLE_Y0 + 6);
+    ctx.lineTo(midX, TABLE_Y1 - 6);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const kx0 = TABLE_X0 + 6;
+    const kx1 = TABLE_X0 + TW * 0.5 - 6;
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(kx0, TABLE_Y0 + 8, kx1 - kx0, TH - 16);
+
+    for (const p of pockets) {
+      const g = ctx.createRadialGradient(p.x, p.y, 4, p.x, p.y, POCKET_R);
+      g.addColorStop(0, '#0a0a0a');
+      g.addColorStop(1, '#1a1a1a');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, POCKET_R - 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawBall(b) {
+    if (!b.onTable) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2);
+
+    if (b.type === 'cue') {
+      ctx.fillStyle = '#f8fafc';
+      ctx.fill();
+      ctx.strokeStyle = '#cbd5e1';
+    } else if (b.type === 'eight') {
+      ctx.fillStyle = '#111';
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('8', b.x, b.y + 1);
+      ctx.strokeStyle = '#333';
+    } else if (b.type === 'solid') {
+      const n = b.ballNum;
+      const col = BALL_COLOR[n] || '#eab308';
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y + BALL_R * 0.32, BALL_R * 0.42, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#111';
+      ctx.font = 'bold 9px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(n), b.x, b.y + BALL_R * 0.32);
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    } else {
+      const n = b.ballNum;
+      const col = BALL_COLOR[n] || '#c0392b';
+      ctx.fillStyle = '#f8fafc';
+      ctx.fill();
+      ctx.fillStyle = col;
+      ctx.fillRect(b.x - BALL_R * 0.92, b.y - 4.5, BALL_R * 1.84, 9);
+      ctx.fillStyle = '#111';
+      ctx.font = 'bold 9px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(n), b.x, b.y + 0.5);
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+    }
+
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawAim() {
+    if (phase !== 'aim' || !cueBall || !cueBall.onTable) return;
+    const cx = cueBall.x;
+    const cy = cueBall.y;
+    let dx = aimX - cx;
+    let dy = aimY - cy;
+    let L = Math.hypot(dx, dy);
+    if (L < 1) return;
+    dx /= L;
+    dy /= L;
+
+    ctx.save();
+    ctx.setLineDash([6, 8]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + dx * 220, cy + dy * 220);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    if (charging) {
+      const t = Math.min(1, (performance.now() - chargeStart) / MAX_POWER_MS);
+      const pull = 24 + t * 70;
+      ctx.strokeStyle = 'rgba(248, 250, 252, 0.9)';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(cx - dx * pull, cy - dy * pull);
+      ctx.lineTo(cx, cy);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function render() {
+    drawTable();
+    for (const b of balls) drawBall(b);
+    drawAim();
+  }
+
+  function gameLoop() {
+    if (phase === 'rolling') loopRolling();
+    if (charging) {
+      const t = Math.min(1, (performance.now() - chargeStart) / MAX_POWER_MS);
+      powerBar.style.width = String(t * 100) + '%';
+    } else {
+      powerBar.style.width = '0%';
+    }
+    render();
+    requestAnimationFrame(gameLoop);
+  }
+
+  function pointerPos(ev) {
+    const r = canvas.getBoundingClientRect();
+    const sx = r.width / W;
+    const sy = r.height / H;
+    return {
+      x: (ev.clientX - r.left) / sx,
+      y: (ev.clientY - r.top) / sy,
+    };
+  }
+
+  function tryShoot() {
+    if (phase !== 'aim' || !cueBall || !cueBall.onTable) return;
+    if (!charging) return;
+    const t = Math.min(1, (performance.now() - chargeStart) / MAX_POWER_MS);
+    charging = false;
+    if (t < 0.04) return;
+
+    let dx = aimX - cueBall.x;
+    let dy = aimY - cueBall.y;
+    let L = Math.hypot(dx, dy);
+    if (L < 1) return;
+    dx /= L;
+    dy /= L;
+
+    const speed = MIN_SHOT_SPEED + t * (MAX_SPEED - MIN_SHOT_SPEED);
+    cueBall.vx = dx * speed;
+    cueBall.vy = dy * speed;
+    lastShotPlayer = currentPlayer;
+    pocketedThisTurn = [];
+    phase = 'rolling';
+    refreshHud();
+  }
+
+  canvas.addEventListener('pointermove', (e) => {
+    const p = pointerPos(e);
+    aimX = p.x;
+    aimY = p.y;
+    if (placingCue && cueBall) {
+      let nx = p.x;
+      let ny = p.y;
+      nx = Math.max(TABLE_X0 + BALL_R, Math.min(TABLE_X1 - BALL_R, nx));
+      ny = Math.max(TABLE_Y0 + BALL_R, Math.min(TABLE_Y1 - BALL_R, ny));
+      if (kitchenContains(nx, ny) && spotFree(nx, ny)) {
+        cueBall.x = nx;
+        cueBall.y = ny;
+      }
+    }
+  });
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (phase === 'over') return;
+    if (phase === 'rolling') return;
+    if (placingCue) {
+      if (spotFree(cueBall.x, cueBall.y)) {
+        placingCue = false;
+        ballInHand = false;
+      }
+      return;
+    }
+    if (ballInHand) {
+      placingCue = true;
+      return;
+    }
+    if (!cueBall || !cueBall.onTable) return;
+    canvas.setPointerCapture(e.pointerId);
+    charging = true;
+    chargeStart = performance.now();
+  });
+
+  canvas.addEventListener('pointerup', (e) => {
+    if (charging) tryShoot();
+    charging = false;
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch (_) {}
+  });
+
+  canvas.addEventListener('pointerleave', () => {
+    if (charging) tryShoot();
+    charging = false;
+  });
+
+  newBtn.addEventListener('click', () => initTable());
+  againBtn.addEventListener('click', () => initTable());
+
+  initTable();
+  gameLoop();
+})();
+  </script>
+</body>
+</html>

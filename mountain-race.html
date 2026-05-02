@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Горная гонка — трасса</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: #0f1729;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      touch-action: none;
+    }
+    h1 { font-size: 1.2rem; font-weight: 600; margin-bottom: 0.35rem; }
+    .hint {
+      font-size: 0.8rem;
+      color: #8ab;
+      margin-bottom: 0.5rem;
+      max-width: 420px;
+      text-align: center;
+      line-height: 1.4;
+    }
+    #wrap {
+      position: relative;
+      border: 3px solid #3d5a7c;
+      border-radius: 10px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+      overflow: hidden;
+    }
+    canvas { display: block; background: #87ceeb; }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(8, 12, 24, 0.88);
+      text-align: center;
+      padding: 1rem;
+    }
+    #overlay h2 { font-size: 1.45rem; margin-bottom: 0.5rem; }
+    #overlay p { color: #aab; margin-bottom: 1rem; max-width: 320px; line-height: 1.45; }
+    #overlay button {
+      background: #e94560;
+      color: #fff;
+      border: none;
+      padding: 0.65rem 1.4rem;
+      font-size: 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #overlay button:hover { filter: brightness(1.08); }
+    #hud {
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+      color: #9cf;
+      display: flex;
+      gap: 1.25rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    #hud strong { color: #fff; }
+    .race-tag {
+      display: inline-block;
+      background: linear-gradient(180deg, #ff3355, #c41e3a);
+      color: #fff;
+      font-size: 0.65rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      vertical-align: middle;
+      margin-right: 0.35rem;
+    }
+    .boost-bar {
+      margin-top: 0.65rem;
+      display: flex;
+      justify-content: center;
+      width: 100%;
+      max-width: 420px;
+    }
+    .boost-btn {
+      min-width: 200px;
+      padding: 0.75rem 1.5rem;
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      font-family: inherit;
+      background: linear-gradient(180deg, #ff6b35 0%, #e94560 55%, #b83252 100%);
+      box-shadow: 0 4px 14px rgba(233, 69, 96, 0.45), inset 0 1px 0 rgba(255,255,255,0.25);
+      transition: transform 0.08s, filter 0.15s, opacity 0.15s;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .boost-btn:hover:not(:disabled) {
+      filter: brightness(1.08);
+    }
+    .boost-btn:active:not(:disabled),
+    .boost-btn.boost-btn--pressed:not(:disabled) {
+      transform: scale(0.97);
+      filter: brightness(1.15);
+    }
+    .boost-btn:disabled {
+      opacity: 0.38;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+  </style>
+</head>
+<body>
+  <h1><span class="race-tag">ГОНКА</span> Горная трасса</h1>
+  <p class="hint">Гонка до финиша: первым приезжает победитель. ← → / A D — полосы. Удерживай кнопку «Нитро» ниже, ↑ или W — то же ускорение. Не врезайся в соперников в своей полосе.</p>
+  <div id="wrap">
+    <canvas id="game" width="420" height="620" aria-label="Гонка"></canvas>
+    <div id="overlay">
+      <h2 id="title">Горная гонка</h2>
+      <p id="msg">Два соперника, разная скорость. Пробел — заезд и отсчёт.</p>
+      <button type="button" id="startBtn">Старт</button>
+    </div>
+  </div>
+  <div id="hud">
+    <span>Скорость: <strong id="speedVal">0</strong> км/ч</span>
+    <span>До финиша: <strong id="distVal">0</strong> м</span>
+    <span>Позиция: <strong id="placeVal">—</strong> из 3</span>
+    <span>Нитро: <strong id="nitroVal">100</strong>%</span>
+  </div>
+  <div class="boost-bar">
+    <button type="button" id="boostBtn" class="boost-btn" disabled aria-label="Удерживать для нитро — набор скорости">Нитро — газ</button>
+  </div>
+
+  <script>
+(function () {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const titleEl = document.getElementById('title');
+  const msgEl = document.getElementById('msg');
+  const startBtn = document.getElementById('startBtn');
+  const distVal = document.getElementById('distVal');
+  const placeVal = document.getElementById('placeVal');
+  const speedVal = document.getElementById('speedVal');
+  const nitroVal = document.getElementById('nitroVal');
+  const boostBtn = document.getElementById('boostBtn');
+
+  const LANES = 3;
+  const W = canvas.width;
+  const H = canvas.height;
+  const TRACK_LENGTH = 14000;
+  const PLAYER_BASE_SPEED = 335;
+  /** Отображение км/ч на HUD (условная шкала под скорость игры) */
+  const KMH_FACTOR = 0.62;
+  const BOOST_MULT = 1.34;
+  const NITRO_DRAIN_PER_SEC = 32;
+  const NITRO_REGEN_PER_SEC = 9;
+  const COUNTDOWN_MS = 4000;
+  const COLLISION_DIST = 46;
+  const START_ROW_GAP = 105;
+  const horizonBase = 125;
+  const playerScreenY = H * 0.76;
+  const roadBottomW = W * 0.88;
+  const roadTopW = 26;
+
+  const BRIDGE_START = 5200;
+  const BRIDGE_END = 8200;
+
+  const PALETTE = ['#e94560', '#f39c12'];
+  const CARS_TOTAL = 3;
+
+  let playerDist = 0;
+  let playerX = 0;
+  let targetLane = 1;
+  let opponents = [];
+  let running = false;
+  let finished = false;
+  let lastTs = 0;
+  /** До конца отсчёта физика трассы выключена */
+  let countdownMs = 0;
+  let raceLive = false;
+  let nitroPct = 100;
+  let boostHeld = false;
+
+  function hillOffset(dist) {
+    return Math.sin(dist * 0.00065) * 22 + Math.sin(dist * 0.00031) * 11;
+  }
+
+  function horizonYNow() {
+    return horizonBase + hillOffset(playerDist);
+  }
+
+  function roadWidthAtScreenY(screenY, horizonY) {
+    const span = playerScreenY - horizonY;
+    if (span <= 1) return roadBottomW;
+    const t = Math.max(0, Math.min(1, (screenY - horizonY) / span));
+    return roadTopW + t * (roadBottomW - roadTopW);
+  }
+
+  function curveOffset(dist, screenY, horizonY) {
+    const wobble = Math.sin(dist * 0.0011) * 0.18 + Math.sin(dist * 0.00047) * 0.1;
+    const t = (screenY - horizonY) / Math.max(1, playerScreenY - horizonY);
+    return wobble * (roadBottomW * 0.35) * Math.max(0, t);
+  }
+
+  function project(relD, lane, horizonY) {
+    const maxAhead = 5200;
+    const maxBehind = 1400;
+    if (relD > maxAhead || relD < -maxBehind) return null;
+
+    let screenY;
+    let scale;
+    if (relD >= 0) {
+      const t = 1 - Math.exp(-relD / 1950);
+      screenY = playerScreenY - t * (playerScreenY - horizonY - 24);
+      scale = 0.38 + 0.62 * Math.exp(-relD / 2400);
+    } else {
+      const tb = Math.min(1, -relD / maxBehind);
+      screenY = playerScreenY + tb * (H - playerScreenY - 16) * 0.52;
+      scale = 0.5 + 0.42 * (1 - tb);
+    }
+
+    const roadW = roadWidthAtScreenY(screenY, horizonY);
+    const laneW = roadW / LANES;
+    const lx = (lane - 1) * laneW;
+    const cx = W / 2 + curveOffset(playerDist + relD * 0.5, screenY, horizonY) + lx;
+
+    return { x: cx, y: screenY, scale, roadW };
+  }
+
+  function drawSkyGradient(horizonY) {
+    const g = ctx.createLinearGradient(0, 0, 0, horizonY + 40);
+    g.addColorStop(0, '#6eb5ff');
+    g.addColorStop(0.55, '#a8d4ff');
+    g.addColorStop(1, '#c8e6ff');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, horizonY + 45);
+  }
+
+  function drawMountains(horizonY) {
+    ctx.fillStyle = '#5c6b7a';
+    ctx.beginPath();
+    ctx.moveTo(0, horizonY + 8);
+    ctx.lineTo(W * 0.08, horizonY - 35);
+    ctx.lineTo(W * 0.22, horizonY + 5);
+    ctx.lineTo(W * 0.35, horizonY - 55);
+    ctx.lineTo(W * 0.48, horizonY - 8);
+    ctx.lineTo(W * 0.62, horizonY - 62);
+    ctx.lineTo(W * 0.78, horizonY + 3);
+    ctx.lineTo(W * 0.92, horizonY - 28);
+    ctx.lineTo(W, horizonY + 10);
+    ctx.lineTo(W, horizonY + 30);
+    ctx.lineTo(0, horizonY + 30);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = '#4a5563';
+    ctx.beginPath();
+    ctx.moveTo(0, horizonY + 12);
+    ctx.lineTo(W * 0.12, horizonY - 18);
+    ctx.lineTo(W * 0.28, horizonY + 15);
+    ctx.lineTo(W * 0.44, horizonY - 38);
+    ctx.lineTo(W * 0.58, horizonY + 8);
+    ctx.lineTo(W * 0.72, horizonY - 42);
+    ctx.lineTo(W * 0.88, horizonY + 6);
+    ctx.lineTo(W, horizonY - 12);
+    ctx.lineTo(W, horizonY + 28);
+    ctx.lineTo(0, horizonY + 28);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawSandAndWater(horizonY, leftX, rightX) {
+    ctx.fillStyle = '#d4c4a0';
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    ctx.lineTo(0, horizonY + 20);
+    ctx.lineTo(leftX, horizonY);
+    ctx.lineTo(W / 2 - roadBottomW / 2, playerScreenY);
+    ctx.lineTo(W / 2 - roadBottomW / 2, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(W, H);
+    ctx.lineTo(W, horizonY + 20);
+    ctx.lineTo(rightX, horizonY);
+    ctx.lineTo(W / 2 + roadBottomW / 2, playerScreenY);
+    ctx.lineTo(W / 2 + roadBottomW / 2, H);
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+
+    const wg = ctx.createLinearGradient(0, horizonY + 40, 0, H);
+    wg.addColorStop(0, '#3d7eae');
+    wg.addColorStop(0.4, '#2b6cb0');
+    wg.addColorStop(1, '#1e4e80');
+    ctx.fillStyle = wg;
+    ctx.fillRect(0, horizonY + 55, W * 0.04, H);
+    ctx.fillRect(W * 0.96, horizonY + 55, W * 0.04, H);
+  }
+
+  function drawRoadPerspective(horizonY) {
+    const cx = W / 2;
+    const hwTop = roadTopW / 2;
+    const hwBot = roadBottomW / 2;
+
+    ctx.fillStyle = '#2d3748';
+    ctx.beginPath();
+    ctx.moveTo(cx - hwTop, horizonY);
+    ctx.lineTo(cx + hwTop, horizonY);
+    ctx.lineTo(cx + hwBot, H + 2);
+    ctx.lineTo(cx - hwBot, H + 2);
+    ctx.closePath();
+    ctx.fill();
+
+    const dashPh = (playerDist * 0.11) % 40;
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([14, 18]);
+    ctx.lineDashOffset = -dashPh;
+    for (let i = 1; i < LANES; i++) {
+      const t = i / LANES;
+      const xH = cx - hwTop + t * (2 * hwTop);
+      const xB = cx - hwBot + t * (2 * hwBot);
+      ctx.beginPath();
+      ctx.moveTo(xH, horizonY);
+      ctx.lineTo(xB, H + 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx - hwTop, horizonY);
+    ctx.lineTo(cx - hwBot, H + 2);
+    ctx.moveTo(cx + hwTop, horizonY);
+    ctx.lineTo(cx + hwBot, H + 2);
+    ctx.stroke();
+  }
+
+  function drawBridge(hy) {
+    const cx = W / 2;
+    const hwTop = roadTopW / 2;
+    const hwBot = roadBottomW / 2;
+    ctx.fillStyle = 'rgba(90, 70, 50, 0.85)';
+    const railW = 10;
+    ctx.beginPath();
+    ctx.moveTo(cx - hwBot - railW, H);
+    ctx.lineTo(cx - hwTop - 6, hy);
+    ctx.lineTo(cx - hwTop - 2, hy);
+    ctx.lineTo(cx - hwBot, H);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx + hwBot + railW, H);
+    ctx.lineTo(cx + hwTop + 6, hy);
+    ctx.lineTo(cx + hwTop + 2, hy);
+    ctx.lineTo(cx + hwBot, H);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(60,45,35,0.9)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(cx - hwTop - 8, hy + 2);
+    ctx.lineTo(cx - hwBot - 12, H);
+    ctx.moveTo(cx + hwTop + 8, hy + 2);
+    ctx.lineTo(cx + hwBot + 12, H);
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(45, 85, 130, 0.45)';
+    ctx.fillRect(cx - hwBot * 0.85, playerScreenY + 30, hwBot * 1.7, H - playerScreenY - 15);
+  }
+
+  function drawStartFinish(hy) {
+    if (playerDist < 380) {
+      const t = Math.max(0, 1 - playerDist / 380);
+      const yLine = playerScreenY - 40 * t;
+      const bw = roadBottomW * 0.72;
+      ctx.fillStyle = '#f8f8f8';
+      ctx.fillRect(W / 2 - bw / 2, yLine, bw, 10);
+      const sq = 14;
+      for (let i = 0; i < 16; i++) {
+        ctx.fillStyle = i % 2 === 0 ? '#111' : '#eee';
+        ctx.fillRect(W / 2 - bw / 2 + i * sq, yLine, sq, 10);
+      }
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.font = 'bold 14px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('СТАРТ', W / 2, yLine - 8);
+    }
+    const finZ = TRACK_LENGTH - playerDist;
+    if (finZ > 0 && finZ < 4200) {
+      const t = 1 - Math.exp(-finZ / 1600);
+      const fy = playerScreenY - t * (playerScreenY - hy - 30);
+      const fw = roadWidthAtScreenY(fy, hy) * 0.75;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(W / 2 - fw / 2, fy, fw, 8);
+      for (let i = 0; i < Math.ceil(fw / 12); i++) {
+        ctx.fillStyle = i % 2 === 0 ? '#111' : '#fff';
+        ctx.fillRect(W / 2 - fw / 2 + i * 12, fy, 12, 8);
+      }
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.font = 'bold 13px system-ui,sans-serif';
+      ctx.fillText('ФИНИШ', W / 2, fy - 6);
+    }
+  }
+
+  function drawCarScaled(cx, cy, baseW, baseH, bodyColor, isPlayer, scale) {
+    const w = baseW * scale;
+    const h = baseH * scale;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    if (typeof ctx.ellipse === 'function') {
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.beginPath();
+      ctx.ellipse(0, h * 0.42, w * 0.52, h * 0.14, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const bw = w * 0.5;
+    const mw = w * 0.42;
+    const tw = w * 0.3;
+
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath();
+    ctx.moveTo(-bw, h * 0.42);
+    ctx.quadraticCurveTo(-bw * 1.05, h * 0.15, -mw, -h * 0.12);
+    ctx.lineTo(-tw * 0.95, -h * 0.48);
+    ctx.lineTo(tw * 0.95, -h * 0.48);
+    ctx.lineTo(mw, -h * 0.12);
+    ctx.quadraticCurveTo(bw * 1.05, h * 0.15, bw, h * 0.42);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = Math.max(1, 1.4 * scale);
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(15,22,38,0.95)';
+    ctx.beginPath();
+    ctx.moveTo(-mw * 0.88, -h * 0.02);
+    ctx.lineTo(-tw * 0.75, -h * 0.44);
+    ctx.lineTo(tw * 0.75, -h * 0.44);
+    ctx.lineTo(mw * 0.88, -h * 0.02);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(60,90,130,0.45)';
+    ctx.beginPath();
+    ctx.moveTo(-tw * 0.55, -h * 0.38);
+    ctx.lineTo(tw * 0.55, -h * 0.38);
+    ctx.lineTo(tw * 0.4, -h * 0.18);
+    ctx.lineTo(-tw * 0.4, -h * 0.18);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.fillRect(-bw * 0.95, h * 0.12, bw * 1.9, h * 0.1);
+
+    ctx.fillStyle = '#2a2a2a';
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(-bw * 0.92, h * 0.22, bw * 1.84, h * 0.2, 2 * scale);
+    } else {
+      ctx.rect(-bw * 0.92, h * 0.22, bw * 1.84, h * 0.2);
+    }
+    ctx.fill();
+
+    const tlR = Math.max(2, w * 0.07);
+    ctx.fillStyle = '#ff3b3b';
+    ctx.beginPath();
+    ctx.arc(-bw * 0.72, h * 0.28, tlR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(bw * 0.72, h * 0.28, tlR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,200,200,0.85)';
+    ctx.beginPath();
+    ctx.arc(-bw * 0.72, h * 0.28, tlR * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(bw * 0.72, h * 0.28, tlR * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#f5f5f0';
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(-w * 0.14, h * 0.26, w * 0.28, h * 0.11, 1);
+    } else {
+      ctx.rect(-w * 0.14, h * 0.26, w * 0.28, h * 0.11);
+    }
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 0.8 * scale;
+    ctx.strokeRect(-w * 0.12, h * 0.27, w * 0.24, h * 0.08);
+
+    const wheelW = w * 0.14;
+    const wheelH = h * 0.22;
+    ctx.fillStyle = '#121212';
+    for (const sx of [-1, 1]) {
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(sx * bw * 0.92 - wheelW / 2, h * 0.08, wheelW, wheelH, 3 * scale);
+      } else {
+        ctx.rect(sx * bw * 0.92 - wheelW / 2, h * 0.08, wheelW, wheelH);
+      }
+      ctx.fill();
+      ctx.fillStyle = '#3a3a3a';
+      ctx.fillRect(sx * bw * 0.92 - wheelW * 0.35, h * 0.14, wheelW * 0.7, wheelH * 0.35);
+      ctx.fillStyle = '#121212';
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(-tw * 0.15, -h * 0.46, tw * 0.3, h * 0.06);
+
+    if (isPlayer) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = Math.max(2, 2.5 * scale);
+      ctx.beginPath();
+      ctx.moveTo(-bw * 1.02, h * 0.45);
+      ctx.quadraticCurveTo(-bw * 1.08, h * 0.12, -mw, -h * 0.14);
+      ctx.lineTo(-tw, -h * 0.52);
+      ctx.lineTo(tw, -h * 0.52);
+      ctx.lineTo(mw, -h * 0.14);
+      ctx.quadraticCurveTo(bw * 1.08, h * 0.12, bw * 1.02, h * 0.45);
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function laneFromPlayerX() {
+    const hy = horizonYNow();
+    const c = curveOffset(playerDist, playerScreenY, hy);
+    const laneW = roadBottomW / LANES;
+    const left = W / 2 + c - roadBottomW / 2;
+    const idx = Math.floor((playerX - left) / laneW);
+    return Math.max(0, Math.min(LANES - 1, idx));
+  }
+
+  function computePlace() {
+    let ahead = 0;
+    for (const o of opponents) {
+      if (o.dist > playerDist) ahead++;
+    }
+    return ahead + 1;
+  }
+
+  function syncPlayerXFromLane() {
+    const hy = horizonYNow();
+    const laneW = roadBottomW / LANES;
+    playerX =
+      W / 2 +
+      curveOffset(playerDist, playerScreenY, hy) +
+      (targetLane - 1) * laneW;
+  }
+
+  function initRace() {
+    /** Две машины — на разной глубине по трассе (не один поперечный ряд) */
+    const rowA = 62 + Math.floor(Math.random() * 18);
+    const rowGap = 72 + Math.floor(Math.random() * 28);
+    const rowB = rowA + rowGap;
+
+    targetLane = 1;
+    finished = false;
+    nitroPct = 100;
+    boostHeld = false;
+
+    /** Заметно разная скорость: «медленная» ~0.72–0.82, «быстрая» ~1.18–1.32 от базы игрока */
+    const slowMult = 0.72 + Math.random() * 0.1;
+    const fastMult = 1.18 + Math.random() * 0.14;
+    const slowLane = Math.random() < 0.5 ? 0 : 2;
+    const fastLane = slowLane === 0 ? 2 : 0;
+
+    opponents = [
+      { dist: rowA, lane: slowLane, speedMult: slowMult, color: PALETTE[0] },
+      { dist: rowB, lane: fastLane, speedMult: fastMult, color: PALETTE[1] },
+    ];
+
+    playerDist = Math.max(rowA, rowB) + START_ROW_GAP + 95;
+    syncPlayerXFromLane();
+  }
+
+  function refreshHud() {
+    distVal.textContent = String(Math.max(0, Math.ceil(TRACK_LENGTH - playerDist)));
+    nitroVal.textContent = String(Math.round(nitroPct));
+    if (!running) {
+      speedVal.textContent = '0';
+      placeVal.textContent = '—';
+      return;
+    }
+    const boostOn = raceLive && boostHeld && nitroPct > 0;
+    speedVal.textContent = raceLive
+      ? String(Math.round(PLAYER_BASE_SPEED * KMH_FACTOR * (boostOn ? BOOST_MULT : 1)))
+      : '0';
+    placeVal.textContent = raceLive ? String(computePlace()) : '—';
+    if (boostBtn) {
+      boostBtn.disabled = !running || !raceLive;
+    }
+  }
+
+  function drawCountdownOverlay() {
+    if (!running || raceLive || countdownMs <= 0) return;
+    let txt = 'Вперёд!';
+    if (countdownMs > 3000) txt = '3';
+    else if (countdownMs > 2000) txt = '2';
+    else if (countdownMs > 1000) txt = '1';
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 86px system-ui,Segoe UI,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(txt, W / 2, H * 0.38);
+    ctx.shadowBlur = 0;
+    ctx.font = '600 13px system-ui,sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText('Старт с места — жди зелёного', W / 2, H * 0.52);
+    ctx.restore();
+  }
+
+  function drawRacingStripHud() {
+    if (!running) return;
+    const pct = Math.min(1, playerDist / TRACK_LENGTH);
+    const barY = 8;
+    const barH = 10;
+    const margin = 10;
+    const bw = W - margin * 2;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(margin, barY, bw, barH + 22, 6);
+    } else {
+      ctx.rect(margin, barY, bw, barH + 22);
+    }
+    ctx.fill();
+
+    ctx.fillStyle = '#374151';
+    ctx.fillRect(margin + 6, barY + 18, bw - 12, barH);
+
+    const grad = ctx.createLinearGradient(margin, 0, margin + bw, 0);
+    grad.addColorStop(0, '#22c55e');
+    grad.addColorStop(0.65, '#eab308');
+    grad.addColorStop(1, '#ef4444');
+    ctx.fillStyle = grad;
+    ctx.fillRect(margin + 6, barY + 18, (bw - 12) * pct, barH);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 11px system-ui,sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('ГОНКА  ·  до финиша', margin + 10, barY + 4);
+
+    const kmLeft = Math.max(0, (TRACK_LENGTH - playerDist) / 1000);
+    ctx.textAlign = 'right';
+    ctx.fillText(kmLeft.toFixed(2) + ' км', W - margin - 10, barY + 4);
+    ctx.restore();
+  }
+
+  function collide() {
+    const myLane = laneFromPlayerX();
+    for (const o of opponents) {
+      if (o.lane !== myLane) continue;
+      if (Math.abs(o.dist - playerDist) < COLLISION_DIST) return true;
+    }
+    return false;
+  }
+
+  function update(dt) {
+    if (finished) return;
+
+    const k = 1 - Math.exp(-0.022 * dt);
+    const hy = horizonYNow();
+    const laneW = roadBottomW / LANES;
+    const goalX = W / 2 + curveOffset(playerDist, playerScreenY, hy) + (targetLane - 1) * laneW;
+    playerX += (goalX - playerX) * k;
+
+    if (!raceLive) {
+      countdownMs -= dt;
+      if (countdownMs <= 0) raceLive = true;
+      refreshHud();
+      return;
+    }
+
+    const boostOn = boostHeld && nitroPct > 0;
+    if (boostOn) {
+      nitroPct = Math.max(0, nitroPct - (NITRO_DRAIN_PER_SEC * dt) / 1000);
+    } else {
+      nitroPct = Math.min(100, nitroPct + (NITRO_REGEN_PER_SEC * dt) / 1000);
+    }
+
+    const playerMult = boostOn ? BOOST_MULT : 1;
+    playerDist += PLAYER_BASE_SPEED * playerMult * (dt / 1000);
+
+    for (const o of opponents) {
+      o.dist += o.speedMult * PLAYER_BASE_SPEED * (dt / 1000);
+    }
+
+    if (collide()) {
+      running = false;
+      raceLive = false;
+      boostHeld = false;
+      if (boostBtn) boostBtn.classList.remove('boost-btn--pressed');
+      countdownMs = 0;
+      titleEl.textContent = 'Сход с трассы';
+      msgEl.textContent = 'В гонке нельзя наезжать на соперника в той же полосе. Новый заезд — «Ещё раз».';
+      startBtn.textContent = 'Ещё раз';
+      overlay.style.display = 'flex';
+      return;
+    }
+
+    if (playerDist >= TRACK_LENGTH) {
+      finished = true;
+      running = false;
+      raceLive = false;
+      boostHeld = false;
+      if (boostBtn) boostBtn.classList.remove('boost-btn--pressed');
+      const place = computePlace();
+      titleEl.textContent = place === 1 ? 'Победа в гонке!' : 'Финиш заезда';
+      msgEl.textContent =
+        place === 1
+          ? 'Ты первая — кубок твоей полке!'
+          : 'Место: ' + place + ' из ' + CARS_TOTAL + '. Обгоняй раньше или жми нитро на прямых.';
+      startBtn.textContent = 'Новая гонка';
+      overlay.style.display = 'flex';
+      return;
+    }
+
+    refreshHud();
+  }
+
+  function render() {
+    const hy = horizonYNow();
+    const leftH = W / 2 - roadTopW / 2;
+    const rightH = W / 2 + roadTopW / 2;
+
+    drawSkyGradient(hy);
+    drawMountains(hy);
+    drawSandAndWater(hy, leftH, rightH);
+    drawRoadPerspective(hy);
+
+    const onBridge = playerDist >= BRIDGE_START && playerDist <= BRIDGE_END;
+    if (onBridge) drawBridge(hy);
+
+    drawStartFinish(hy);
+
+    const batch = [];
+    for (const o of opponents) {
+      const rel = o.dist - playerDist;
+      const p = project(rel, o.lane, hy);
+      if (p) batch.push({ rel, p, color: o.color });
+    }
+    batch.sort((a, b) => b.rel - a.rel);
+
+    const baseCarW = roadBottomW / LANES - 10;
+    const baseCarH = 52;
+
+    for (const b of batch) {
+      drawCarScaled(b.p.x, b.p.y, baseCarW, baseCarH, b.color, false, b.p.scale);
+    }
+
+    drawCarScaled(playerX, playerScreenY, baseCarW, baseCarH, '#00d9ff', true, 1);
+
+    drawRacingStripHud();
+    drawCountdownOverlay();
+  }
+
+  function loop(ts) {
+    if (!running) return;
+    const dt = Math.min(50, ts - lastTs);
+    lastTs = ts;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  function startGame() {
+    initRace();
+    countdownMs = COUNTDOWN_MS;
+    raceLive = false;
+    running = true;
+    overlay.style.display = 'none';
+    lastTs = performance.now();
+    refreshHud();
+    requestAnimationFrame(loop);
+  }
+
+  function move(dir) {
+    if (!running || finished) return;
+    targetLane = Math.max(0, Math.min(LANES - 1, targetLane + dir));
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+      e.preventDefault();
+      move(-1);
+    } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+      e.preventDefault();
+      move(1);
+    } else if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
+      if (running && raceLive) {
+        boostHeld = true;
+        e.preventDefault();
+      }
+    } else if (e.key === ' ' || e.key === 'Enter') {
+      if (!running) {
+        e.preventDefault();
+        startGame();
+      }
+    }
+  });
+
+  document.addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') boostHeld = false;
+  });
+
+  startBtn.addEventListener('click', () => {
+    if (!running) startGame();
+  });
+
+  function releaseBoostPointer() {
+    boostHeld = false;
+    if (boostBtn) boostBtn.classList.remove('boost-btn--pressed');
+  }
+
+  function armBoostWindowRelease() {
+    const up = () => {
+      releaseBoostPointer();
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }
+
+  boostBtn.addEventListener('pointerdown', (e) => {
+    if (boostBtn.disabled) return;
+    e.preventDefault();
+    boostHeld = true;
+    boostBtn.classList.add('boost-btn--pressed');
+    armBoostWindowRelease();
+  });
+
+  boostBtn.addEventListener('pointerup', releaseBoostPointer);
+  boostBtn.addEventListener('pointercancel', releaseBoostPointer);
+
+  let touchStartX = 0;
+  canvas.addEventListener('touchstart', (e) => {
+    touchStartX = e.changedTouches[0].clientX;
+  }, { passive: true });
+  canvas.addEventListener('touchend', (e) => {
+    const x = e.changedTouches[0].clientX;
+    const dx = x - touchStartX;
+    if (Math.abs(dx) > 28) move(dx < 0 ? -1 : 1);
+  }, { passive: true });
+
+  initRace();
+  refreshHud();
+  render();
+})();
+  </script>
+</body>
+</html>
