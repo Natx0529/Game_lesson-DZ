@@ -104,7 +104,7 @@
 <body>
   <h1>Пул (упрощённый 8-ball)</h1>
   <p class="hint">
-    Два игрока за одним столом. Наведи направление от битка к курсору. Зажми левую кнопку мыши (или палец) — набирается сила; отпусти — удар.
+    Два игрока за одним столом. Жёлтая линия — путь битка; зелёная от целевого шара — куда уедет этот шар после удара; пунктир при наведении на цветной шар — линия «через центр» для прицела; при зажатии силы линии утолщаются. Наведи направление от битка к курсору. Зажми левую кнопку мыши (или палец) — набирается сила; отпусти — удар.
     Первый забитый цветной шар закрепляет «свои» шары. Забей все свои, затем чёрную — победа. Штраф: уронил биток в лузу — соперник ставит биток в «кухню» (левая половина стола).
   </p>
   <div id="wrap">
@@ -155,13 +155,18 @@
 
   const BALL_R = 9;
   const POCKET_R = 24;
-  const MAX_SPEED = 2550;
-  const FRICTION = 0.994;
-  const REST_WALL = 0.78;
-  const SUB_STEPS = 10;
+  const MAX_SPEED = 2800;
+  /** Трение за субшаг: чем ближе к 1 — тем дольше «катится» стол */
+  const FRICTION = 0.9974;
+  /** Упругость борта и столкновения шаров (реалистичнее чисто упругий удар) */
+  const REST_WALL = 0.88;
+  const REST_BALL = 0.94;
+  const SUB_STEPS = 12;
   const MAX_POWER_MS = 1400;
   const MIN_SHOT_SPEED = 520;
   const STOP_EPS = 8;
+  /** Наведение на цветной шар — подсветка и линия «через центр» */
+  const HOVER_PICK_R = BALL_R * 2.9;
 
   /** Лузы: углы + середины длинных сторон */
   const pockets = [
@@ -373,11 +378,12 @@
     const vn = rvx * nx + rvy * ny;
     if (vn >= 0) return;
 
-    const impulse = 2 * vn / 2;
-    a.vx += impulse * nx;
-    a.vy += impulse * ny;
-    b.vx -= impulse * nx;
-    b.vy -= impulse * ny;
+    const invMassSum = 2;
+    const j = -(1 + REST_BALL) * vn / invMassSum;
+    a.vx -= j * nx;
+    a.vy -= j * ny;
+    b.vx += j * nx;
+    b.vy += j * ny;
   }
 
   function stepPhysics(dt) {
@@ -385,10 +391,14 @@
       if (!b.onTable) continue;
       b.x += b.vx * dt;
       b.y += b.vy * dt;
-      b.vx *= FRICTION;
-      b.vy *= FRICTION;
-      if (Math.abs(b.vx) < 1) b.vx = 0;
-      if (Math.abs(b.vy) < 1) b.vy = 0;
+      const sp = Math.hypot(b.vx, b.vy);
+      let fr = FRICTION;
+      if (sp > 380) fr = 1 - (1 - FRICTION) * 0.42;
+      else if (sp < 95) fr *= 0.991;
+      b.vx *= fr;
+      b.vy *= fr;
+      if (Math.abs(b.vx) < 0.65) b.vx = 0;
+      if (Math.abs(b.vy) < 0.65) b.vy = 0;
       walls(b);
     }
     for (let i = 0; i < balls.length; i++) {
@@ -609,6 +619,125 @@
     ctx.restore();
   }
 
+  /** Первое попадание луча из битка в другой шар (центры на расстоянии 2R) */
+  function rayFirstHitBallDetail(cx, cy, dx, dy, exclude) {
+    const R = BALL_R * 2;
+    let bestT = Infinity;
+    let bestBall = null;
+    for (const b of balls) {
+      if (!b.onTable || b === exclude) continue;
+      const wx = cx - b.x;
+      const wy = cy - b.y;
+      const B = 2 * (wx * dx + wy * dy);
+      const Cq = wx * wx + wy * wy - R * R;
+      const disc = B * B - 4 * Cq;
+      if (disc < 0) continue;
+      const s = Math.sqrt(disc);
+      const t1 = (-B - s) / 2;
+      const t2 = (-B + s) / 2;
+      if (t1 > 1e-4 && t1 < bestT) {
+        bestT = t1;
+        bestBall = b;
+      }
+      if (t2 > 1e-4 && t2 < bestT) {
+        bestT = t2;
+        bestBall = b;
+      }
+    }
+    if (bestBall == null) return null;
+    return { t: bestT, ball: bestBall };
+  }
+
+  function pickHoveredObjectBall(px, py) {
+    let best = null;
+    let bestD = HOVER_PICK_R;
+    for (const b of balls) {
+      if (!b.onTable || b.type === 'cue') continue;
+      const d = dist(px, py, b.x, b.y);
+      if (d < bestD) {
+        bestD = d;
+        best = b;
+      }
+    }
+    return best;
+  }
+
+  /** Луч до внутренней границы стола (центр битка у борта) */
+  function rayHitWall(cx, cy, dx, dy) {
+    const xl = TABLE_X0 + BALL_R;
+    const xr = TABLE_X1 - BALL_R;
+    const yt = TABLE_Y0 + BALL_R;
+    const yb = TABLE_Y1 - BALL_R;
+    let best = Infinity;
+    if (Math.abs(dx) > 1e-9) {
+      const tL = (xl - cx) / dx;
+      if (tL > 1e-4) {
+        const y = cy + tL * dy;
+        if (y >= yt - 1e-6 && y <= yb + 1e-6) best = Math.min(best, tL);
+      }
+      const tR = (xr - cx) / dx;
+      if (tR > 1e-4) {
+        const y = cy + tR * dy;
+        if (y >= yt - 1e-6 && y <= yb + 1e-6) best = Math.min(best, tR);
+      }
+    }
+    if (Math.abs(dy) > 1e-9) {
+      const tT = (yt - cy) / dy;
+      if (tT > 1e-4) {
+        const x = cx + tT * dx;
+        if (x >= xl - 1e-6 && x <= xr + 1e-6) best = Math.min(best, tT);
+      }
+      const tB = (yb - cy) / dy;
+      if (tB > 1e-4) {
+        const x = cx + tB * dx;
+        if (x >= xl - 1e-6 && x <= xr + 1e-6) best = Math.min(best, tB);
+      }
+    }
+    return best === Infinity ? null : best;
+  }
+
+  function cueTrajectoryEnd(cx, cy, dx, dy) {
+    const detail = rayFirstHitBallDetail(cx, cy, dx, dy, cueBall);
+    const tWall = rayHitWall(cx, cy, dx, dy);
+    const tb = detail ? detail.t : Infinity;
+    const tw = tWall == null ? Infinity : tWall;
+    const maxLen = Math.hypot(TW, TH) * 1.15;
+    let t = Math.min(tb, tw, maxLen);
+    const hitBall = tb < tw - 1e-5 && tb < Infinity;
+    return {
+      t,
+      hitBall,
+      hitWall: !hitBall && tw < tb - 1e-5 && tw < Infinity,
+      hitBallRef: hitBall && detail ? detail.ball : null,
+    };
+  }
+
+  /** Направление полёта целевого шара после удара (линия центров в момент касания) */
+  function objectOutboundDir(Px, Py, Ox, Oy) {
+    const vx = Ox - Px;
+    const vy = Oy - Py;
+    const L = Math.hypot(vx, vy);
+    if (L < 1e-6) return { ux: 0, uy: -1 };
+    return { ux: vx / L, uy: vy / L };
+  }
+
+  /** Отрезок луча от точки до борта (длина полёта центра шара) */
+  function strokeRayToWall(sx, sy, ux, uy, strokeStyle, lineWidth, dash) {
+    const tLen = rayHitWall(sx, sy, ux, uy);
+    const len = tLen == null ? Math.hypot(TW, TH) * 1.2 : tLen;
+    ctx.save();
+    if (dash) ctx.setLineDash(dash);
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + ux * len, sy + uy * len);
+    ctx.stroke();
+    if (dash) ctx.setLineDash([]);
+    ctx.restore();
+  }
+
   function drawAim() {
     if (phase !== 'aim' || !cueBall || !cueBall.onTable) return;
     const cx = cueBall.x;
@@ -620,21 +749,94 @@
     dx /= L;
     dy /= L;
 
+    const tr = cueTrajectoryEnd(cx, cy, dx, dy);
+    const ex = cx + dx * tr.t;
+    const ey = cy + dy * tr.t;
+
+    const hover = pickHoveredObjectBall(aimX, aimY);
+    const wCue = charging ? 3.2 : 2.4;
+    const wObj = charging ? 3 : 2.35;
+    const wGuide = charging ? 2 : 1.45;
+
     ctx.save();
-    ctx.setLineDash([6, 8]);
-    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-    ctx.lineWidth = 1.5;
+
+    if (charging) {
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.4)';
+      ctx.lineWidth = 5.5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+    }
+
+    if (hover) {
+      const gvx = hover.x - cx;
+      const gvy = hover.y - cy;
+      const gL = Math.hypot(gvx, gvy);
+      if (gL > 8) {
+        const gx = gvx / gL;
+        const gy = gvy / gL;
+        const ext = Math.hypot(TW, TH) * 0.65;
+        ctx.strokeStyle = charging
+          ? 'rgba(255, 255, 255, 0.82)'
+          : 'rgba(226, 232, 240, 0.55)';
+        ctx.lineWidth = wGuide;
+        ctx.setLineDash([5, 7]);
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(cx - gx * 22, cy - gy * 22);
+        ctx.lineTo(cx + gx * ext, cy + gy * ext);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.strokeStyle = hover === tr.hitBallRef
+        ? 'rgba(52, 211, 153, 0.95)'
+        : 'rgba(251, 191, 36, 0.75)';
+      ctx.lineWidth = hover === tr.hitBallRef ? 2.8 : 2;
+      ctx.beginPath();
+      ctx.arc(hover.x, hover.y, BALL_R + 5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = 'rgba(251, 191, 36, 0.95)';
+    ctx.lineWidth = wCue;
+    ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + dx * 220, cy + dy * 220);
+    ctx.lineTo(ex, ey);
     ctx.stroke();
-    ctx.setLineDash([]);
+
+    if (tr.hitBall && tr.hitBallRef) {
+      ctx.fillStyle = charging
+        ? 'rgba(251, 191, 36, 0.42)'
+        : 'rgba(251, 191, 36, 0.35)';
+      ctx.beginPath();
+      ctx.arc(ex, ey, BALL_R, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.75)';
+      ctx.lineWidth = charging ? 1.5 : 1.2;
+      ctx.stroke();
+
+      const Ob = tr.hitBallRef;
+      const out = objectOutboundDir(ex, ey, Ob.x, Ob.y);
+      const objCol = charging
+        ? 'rgba(167, 243, 208, 0.98)'
+        : 'rgba(52, 211, 153, 0.92)';
+      strokeRayToWall(Ob.x, Ob.y, out.ux, out.uy, objCol, wObj, null);
+    } else if (tr.hitWall) {
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.65)';
+      ctx.beginPath();
+      ctx.arc(ex, ey, charging ? 5 : 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     if (charging) {
       const t = Math.min(1, (performance.now() - chargeStart) / MAX_POWER_MS);
       const pull = 24 + t * 70;
-      ctx.strokeStyle = 'rgba(248, 250, 252, 0.9)';
-      ctx.lineWidth = 2.2;
+      ctx.strokeStyle = 'rgba(248, 250, 252, 0.95)';
+      ctx.lineWidth = 2.6;
+      ctx.setLineDash([]);
       ctx.beginPath();
       ctx.moveTo(cx - dx * pull, cy - dy * pull);
       ctx.lineTo(cx, cy);
